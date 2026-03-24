@@ -19,11 +19,14 @@ import os
 import sys
 import json
 import base64
+import getpass
 import urllib.request
 import urllib.error
+from typing import Dict, List, Optional
 
 ORGANIZATION = "loboag"
 PROJECT = "lobo.ecm8"
+TEAM = "lobo.ecm8 Team"
 API_VERSION = "7.1"
 
 # Azure DevOps REST API base URL
@@ -31,7 +34,7 @@ ADO_BASE = f"https://dev.azure.com/{ORGANIZATION}/{PROJECT}/_apis"
 
 # WIQL query that mirrors all filters present in the backlog URL and adds the
 # story-points range requested in the issue.
-WIQL_QUERY = """
+WIQL_QUERY = f"""
 SELECT
     [System.Id],
     [System.Title],
@@ -53,7 +56,7 @@ WHERE
         OR [System.AssignedTo] = 'aibrahim@lobo.ag'
     )
     AND (
-        [System.IterationPath] = @currentIteration
+        [System.IterationPath] = @currentIteration('[{PROJECT}]\\{TEAM}')
         OR [System.IterationPath] = 'lobo.ecm8'
         OR [System.IterationPath] = 'lobo.ecm8\\Feature Requests'
         OR [System.IterationPath] = 'lobo.ecm8\\Not assigned yet'
@@ -68,8 +71,8 @@ def _build_auth_header(pat: str) -> str:
     return f"Basic {token}"
 
 
-def _request(url: str, method: str = "GET", body: dict | None = None,
-             headers: dict | None = None) -> dict:
+def _request(url: str, method: str = "GET", body: Optional[Dict] = None,
+             headers: Optional[Dict] = None) -> Dict:
     """Minimal HTTP helper – returns parsed JSON or raises on error."""
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -83,12 +86,28 @@ def _request(url: str, method: str = "GET", body: dict | None = None,
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode(errors="replace")
+        if exc.code in (401, 403):
+            raise RuntimeError(
+                f"Authentication failed (HTTP {exc.code}). "
+                "Your PAT may be missing, expired, or lacks the "
+                "'Work Items (Read)' scope.\n"
+                "  • Create or review your PAT at: "
+                f"https://dev.azure.com/{ORGANIZATION}/_usersSettings/tokens\n"
+                "  • Then re-run after setting it:\n"
+                "      export AZURE_DEVOPS_PAT=<your-pat>   # Linux/macOS\n"
+                "      set AZURE_DEVOPS_PAT=<your-pat>      # Windows cmd\n"
+                f"  • API response: {body_text}"
+            ) from exc
         raise RuntimeError(
             f"HTTP {exc.code} from {url}: {body_text}"
         ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Network error reaching {url}: {exc.reason}"
+        ) from exc
 
 
-def run_wiql(pat: str) -> list[int]:
+def run_wiql(pat: str) -> List[int]:
     """Execute the WIQL query and return the matching work-item IDs."""
     url = f"{ADO_BASE}/wit/wiql?api-version={API_VERSION}"
     auth = _build_auth_header(pat)
@@ -101,7 +120,7 @@ def run_wiql(pat: str) -> list[int]:
     return [item["id"] for item in result.get("workItems", [])]
 
 
-def get_work_items(pat: str, ids: list[int]) -> list[dict]:
+def get_work_items(pat: str, ids: List[int]) -> List[Dict]:
     """Fetch work-item details in batches of 200 (API limit)."""
     if not ids:
         return []
@@ -116,7 +135,7 @@ def get_work_items(pat: str, ids: list[int]) -> list[dict]:
         "Microsoft.VSTS.Scheduling.StoryPoints"
     )
     auth = _build_auth_header(pat)
-    items: list[dict] = []
+    items: List[Dict] = []
 
     # The batch endpoint accepts at most 200 IDs at a time.
     for i in range(0, len(ids), 200):
@@ -132,7 +151,7 @@ def get_work_items(pat: str, ids: list[int]) -> list[dict]:
     return items
 
 
-def print_table(items: list[dict]) -> None:
+def print_table(items: List[Dict]) -> None:
     """Print results as a plain-text table."""
     if not items:
         print("No User Stories with 10–20 story points found.")
@@ -181,17 +200,33 @@ def main() -> None:
     pat = os.environ.get("AZURE_DEVOPS_PAT", "").strip()
     if not pat:
         print(
-            "Error: set the AZURE_DEVOPS_PAT environment variable to your "
-            "Azure DevOps Personal Access Token (needs 'Work Items (Read)' scope).",
+            "AZURE_DEVOPS_PAT is not set. You can either:\n"
+            "  • Set it as an environment variable before running the script:\n"
+            "      export AZURE_DEVOPS_PAT=<your-pat>   # Linux/macOS\n"
+            "      set AZURE_DEVOPS_PAT=<your-pat>      # Windows cmd\n"
+            "  • Or enter it now (input will not be echoed).\n"
+            f"Create/manage PATs at: "
+            f"https://dev.azure.com/{ORGANIZATION}/_usersSettings/tokens",
             file=sys.stderr,
         )
-        sys.exit(1)
+        try:
+            pat = getpass.getpass("Azure DevOps PAT: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.", file=sys.stderr)
+            sys.exit(1)
+        if not pat:
+            print("Error: no PAT provided.", file=sys.stderr)
+            sys.exit(1)
 
     print(f"Querying Azure DevOps project '{PROJECT}' in org '{ORGANIZATION}' …")
-    ids = run_wiql(pat)
-    print(f"WIQL returned {len(ids)} work item ID(s). Fetching details …")
-    items = get_work_items(pat, ids)
-    print_table(items)
+    try:
+        ids = run_wiql(pat)
+        print(f"WIQL returned {len(ids)} work item ID(s). Fetching details …")
+        items = get_work_items(pat, ids)
+        print_table(items)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
