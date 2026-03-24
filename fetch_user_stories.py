@@ -19,6 +19,7 @@ import os
 import sys
 import json
 import base64
+import getpass
 import urllib.request
 import urllib.error
 from typing import Dict, List, Optional
@@ -85,6 +86,18 @@ def _request(url: str, method: str = "GET", body: Optional[Dict] = None,
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode(errors="replace")
+        if exc.code in (401, 403):
+            raise RuntimeError(
+                f"Authentication failed (HTTP {exc.code}). "
+                "Your PAT may be missing, expired, or lacks the "
+                "'Work Items (Read)' scope.\n"
+                "  • Create or review your PAT at: "
+                f"https://dev.azure.com/{ORGANIZATION}/_usersSettings/tokens\n"
+                "  • Then re-run after setting it:\n"
+                "      export AZURE_DEVOPS_PAT=<your-pat>   # Linux/macOS\n"
+                "      set AZURE_DEVOPS_PAT=<your-pat>      # Windows cmd\n"
+                f"  • API response: {body_text}"
+            ) from exc
         raise RuntimeError(
             f"HTTP {exc.code} from {url}: {body_text}"
         ) from exc
@@ -187,11 +200,23 @@ def main() -> None:
     pat = os.environ.get("AZURE_DEVOPS_PAT", "").strip()
     if not pat:
         print(
-            "Error: set the AZURE_DEVOPS_PAT environment variable to your "
-            "Azure DevOps Personal Access Token (needs 'Work Items (Read)' scope).",
+            "AZURE_DEVOPS_PAT is not set. You can either:\n"
+            "  • Set it as an environment variable before running the script:\n"
+            "      export AZURE_DEVOPS_PAT=<your-pat>   # Linux/macOS\n"
+            "      set AZURE_DEVOPS_PAT=<your-pat>      # Windows cmd\n"
+            "  • Or enter it now (input will not be echoed).\n"
+            f"Create/manage PATs at: "
+            f"https://dev.azure.com/{ORGANIZATION}/_usersSettings/tokens",
             file=sys.stderr,
         )
-        sys.exit(1)
+        try:
+            pat = getpass.getpass("Azure DevOps PAT: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.", file=sys.stderr)
+            sys.exit(1)
+        if not pat:
+            print("Error: no PAT provided.", file=sys.stderr)
+            sys.exit(1)
 
     print(f"Querying Azure DevOps project '{PROJECT}' in org '{ORGANIZATION}' …")
     try:
